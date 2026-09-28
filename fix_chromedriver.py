@@ -54,15 +54,24 @@ def fix_chromedriver_permissions():
                 
                 # Add execute permissions (chmod +x)
                 os.chmod(driver_path, os.stat(driver_path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-                
-                # On macOS, also remove quarantine attribute
+
+                # On macOS, also strip ALL extended attributes (quarantine, provenance, etc.)
+                # and re-sign ad-hoc. Newer macOS versions SIGKILL (-9) unsigned/ad-hoc
+                # driver binaries at launch even when no quarantine flag is present, and
+                # `codesign --force` re-establishes a valid local signature so Gatekeeper
+                # lets the process actually run.
                 if platform.system() == "Darwin":
                     try:
-                        subprocess.run(["xattr", "-d", "com.apple.quarantine", driver_path], 
+                        subprocess.run(["xattr", "-cr", driver_path],
                                       stderr=subprocess.DEVNULL)
                     except:
                         pass  # Ignore if xattr command fails
-                        
+                    try:
+                        subprocess.run(["codesign", "--force", "--deep", "--sign", "-", driver_path],
+                                      stderr=subprocess.DEVNULL)
+                    except:
+                        pass  # Ignore if codesign command fails
+
                 print(f"Fixed permissions for {os.path.basename(driver_path)}")
                 success = True
             except Exception as e:

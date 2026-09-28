@@ -4,6 +4,20 @@ import os
 import json
 from pathlib import Path
 
+_SINGLETON: "ConfigManager | None" = None
+
+def get_config() -> "ConfigManager":
+    """Return the process-wide ConfigManager singleton (avoids repeated disk reads)."""
+    global _SINGLETON
+    if _SINGLETON is None:
+        _SINGLETON = ConfigManager()
+    return _SINGLETON
+
+def invalidate_config_cache():
+    """Force-reload on the next get_config() call (call after saving settings)."""
+    global _SINGLETON
+    _SINGLETON = None
+
 class ConfigManager:
     """Manages application configuration settings."""
     
@@ -22,17 +36,19 @@ class ConfigManager:
         # Create default config if it doesn't exist
         if not os.path.exists(self.config_file):
             default_config = {
-                "search_queries": ["AI ML", "Gen AI", "Agentic AI", "Data Engineer", "Data Analyst", "Machine Learning"],
-                "exclude_keywords": ["Manager", "Director",".net", "SAP","java","w2 only","only w2","no c2c",
-        "only on w2","w2 profiles only","tester","f2f"],
-                "include_keywords": ["AI", "Artificial","Inteligence","Machine","Learning", "ML", "Data", "NLP", "ETL",
-        "Natural Language Processing","analyst","scientist","senior","cloud", 
-        "aws","gcp","Azure","agentic","python","rag","llm"],
+                "search_queries": ["Java Developer", "Senior Java Developer", "Full Stack Java Developer",
+                                    "Java Spring Boot Developer", "Java Microservices Developer"],
+                "exclude_keywords": ["Manager", "Director", ".NET", "SAP", "Data Engineer", "Data Scientist",
+                                      "Machine Learning Engineer", "w2 only", "only w2", "no c2c",
+                                      "only on w2", "w2 profiles only", "tester", "f2f"],
+                "include_keywords": ["Java", "Spring Boot", "Microservices", "Full Stack", "REST API",
+                                      "Hibernate", "JPA", "AWS", "GCP", "Azure", "Kubernetes", "Docker",
+                                      "Kafka", "Angular", "React", "TypeScript"],
         		"resume_profiles": [],
                 "headless_mode": False,
                 "job_application_limit": 50,
                 "save_logs": True,
-                "profile_name_boost_mode": "high"
+                "profile_name_boost_mode": "off"
             }
             
             # Write default config to file
@@ -49,7 +65,7 @@ class ConfigManager:
             if 'profile_name_boost_mode' not in data:
                 # Migrate old bool key if present
                 old_val = data.pop('profile_name_boost', None)
-                data['profile_name_boost_mode'] = 'off' if old_val is False else 'high'
+                data['profile_name_boost_mode'] = 'off'
             return data
         except Exception as e:
             print(f"Error loading config: {e}")

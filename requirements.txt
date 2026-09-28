@@ -1,19 +1,25 @@
 selenium==4.29.0
 python-dotenv==1.0.1
-pandas==2.2.3
+pandas==2.3.3  # 2.2.3 crashes (segfault) on Python 3.14 / numpy 2.5+ inside pd.to_datetime
 openpyxl==3.1.5
 webdriver_manager==4.0.2
+undetected-chromedriver>=3.5.0
+setuptools>=65  # provides the distutils shim undetected-chromedriver still relies on (removed from stdlib in Python 3.12+)
 pyautogui==0.9.54
-requests==2.32.3
+requests>=2.32.3
 beautifulsoup4==4.13.3
 
+# Gmail API (OAuth2) — real Gmail Drafts support, SMTP+app-password can't create drafts
+google-auth-oauthlib>=1.0.0
+google-api-python-client>=2.0.0
+google-auth-httplib2>=0.1.0
+
 # AI & Machine Learning
-torch>=2.0.0
-sentence-transformers>=2.2.2
+fastembed>=0.3.0
 numpy>=1.21.0
-sqlite-utils
 
 # Resume Parsing
+groq>=0.5.0
 PyMuPDF>=1.23.0
 python-docx>=1.1.0
-lxml>=3.1.0
+pywin32>=306; platform_system == "Windows"

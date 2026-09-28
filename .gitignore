@@ -17,6 +17,9 @@ job_application_summary.json
 
 # Personal settings — contains private resume paths and profile data
 config/settings.json
+config/outreach_settings.json
+config/gmail_client_secret.json
+config/gmail_token.json
 
 # Logs
 logs/*.log

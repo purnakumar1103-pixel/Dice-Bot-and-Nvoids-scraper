@@ -15,6 +15,8 @@ import glob
 from pathlib import Path
 from dotenv import load_dotenv, set_key, find_dotenv
 
+_CACHED_BROWSER_PATH: str | None = None
+
 def detect_browser_paths():
     """
     Scans common installation directories and user profiles across macOS and Windows 
@@ -29,9 +31,13 @@ def detect_browser_paths():
     Returns:
         str: The absolute path to the detected browser or None if no browser is found.
     """
+    global _CACHED_BROWSER_PATH
+    if _CACHED_BROWSER_PATH and os.path.exists(_CACHED_BROWSER_PATH):
+        return _CACHED_BROWSER_PATH
+
     system = platform.system()
     browser_paths = {}
-    
+
     # print(f"Detecting browsers on {system} platform...")
     
     if system == "Darwin":  # macOS
@@ -186,8 +192,8 @@ def detect_browser_paths():
             break
     
     if selected_path:
-        # print(f"Selected {selected_browser} at {selected_path} as the preferred browser")
         update_env_file(selected_path)
+        _CACHED_BROWSER_PATH = selected_path
         return selected_path
     else:
         print("No compatible browsers found!")

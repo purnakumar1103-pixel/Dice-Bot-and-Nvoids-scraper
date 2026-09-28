@@ -21,6 +21,7 @@ Key Capabilities:
 import os
 import json
 import pandas as pd
+import platform
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -100,11 +101,14 @@ def get_web_driver(headless=False, retry_with_alternative=True):
     try:
         options = Options()
         options.binary_location = web_browser_path
-        
+
         # Add headless mode options if requested
         if headless:
             options.add_argument("--headless")
-            
+
+        # Enable incognito mode FIRST before other options
+        options.add_argument("--incognito")
+
         options.add_argument("--disable-gpu")
         options.add_argument("--window-size=1920,1080")
         options.add_argument("--disable-blink-features=AutomationControlled")
@@ -112,21 +116,15 @@ def get_web_driver(headless=False, retry_with_alternative=True):
         options.add_argument("--disable-web-security")
         options.add_argument("--disable-features=EnableEphemeralFlashPermission")
         options.add_argument("--no-sandbox")
-        options.add_argument("--remote-debugging-port=9222")
         options.add_argument("--disable-infobars")
         options.add_argument("--disable-notifications")
-        
-        # Clear browser cache and cookies
-        options.add_argument("--disable-application-cache")
-        options.add_argument("--incognito")
 
         driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         
-        # Test navigation to a simple page to verify browser is working
-        driver.get("https://www.google.com")
-        driver.find_element(By.TAG_NAME, "body")  # Should work if page loaded
-        
+        # Set page load timeout to prevent hanging on slow pages
+        driver.set_page_load_timeout(20)
+
         print(f"Successfully initialized browser: {os.path.basename(web_browser_path)}")
         return driver
         
@@ -169,21 +167,20 @@ def get_web_driver(headless=False, retry_with_alternative=True):
             try:
                 options = Options()
                 options.binary_location = alt_path
-                
+
+                # Enable incognito mode FIRST
+                options.add_argument("--incognito")
+
                 if headless:
                     options.add_argument("--headless")
-                    
+
                 options.add_argument("--disable-gpu")
                 options.add_argument("--window-size=1920,1080")
                 options.add_argument("--disable-blink-features=AutomationControlled")
-                options.add_argument("--incognito")  # Use incognito to avoid cache issues
                 
                 driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
                 driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-                
-                # Test navigation
-                driver.get("https://www.google.com")
-                driver.find_element(By.TAG_NAME, "body")
+                driver.set_page_load_timeout(20)
                 
                 print(f"Successfully initialized alternative browser: {os.path.basename(alt_path)}")
                 
@@ -205,7 +202,7 @@ def get_web_driver(headless=False, retry_with_alternative=True):
 
 
 
-def apply_to_job_url(driver, job_url, resume_profiles=None, job_title: str = "", semantic_matcher=None, learning_engine=None, pause_check=None):
+def apply_to_job_url(driver, job_url, resume_profiles=None, job_title: str = "", semantic_matcher=None, learning_engine=None, groq_scorer=None, pause_check=None, headless_mode=False, **kwargs):
     """
     Applies to a job without opening a new tab, preventing focus stealing.
     Instead navigates to job URL in the same tab and returns to original URL when done.
@@ -492,7 +489,12 @@ def apply_to_job_url(driver, job_url, resume_profiles=None, job_title: str = "",
                     # step without managing to upload. After MAX_RESUME_RETRIES we
                     # give up and let the wizard continue so it doesn't get stuck.
                     stuck_on_resume_count = 0
-                    MAX_RESUME_RETRIES = 1
+                    # NOTE: stuck_on_resume_count is incremented BEFORE this is checked
+                    # (see `stuck_on_resume_count += 1` below), so MAX_RESUME_RETRIES=1
+                    # previously gave ZERO real retries (1 < 1 is False) — a single
+                    # transient upload hiccup would give up instantly and submit with
+                    # no resume attached at all. This now allows 3 genuine retries.
+                    MAX_RESUME_RETRIES = 4
 
                     for _ in range(max_steps):
                         if pause_check and pause_check():
@@ -547,12 +549,26 @@ def apply_to_job_url(driver, job_url, resume_profiles=None, job_title: str = "",
                                     }
                                     return bestMatch;
                                 """)
+                                need_os_dialog_fallback = False
                                 if target_input:
-                                    target_input.send_keys(selected_resume_path)
-                                    print(f"Uploaded mapped resume silently via DOM: {selected_resume_path}")
-                                    has_uploaded_resume = True
-                                    time.sleep(2)
+                                    try:
+                                        print(f"Attempting automatic resume upload via Selenium (works on all platforms)...")
+                                        target_input.send_keys(selected_resume_path)
+                                        print(f"✓ Uploaded mapped resume automatically: {selected_resume_path}")
+                                        has_uploaded_resume = True
+                                        time.sleep(2)
+                                    except Exception as send_keys_error:
+                                        # BUG (fixed): this used to only print "Trying OS file dialog..."
+                                        # without actually falling through to that logic below, since it
+                                        # lived in the sibling `else` branch (only reachable when
+                                        # target_input was never found at all). A send_keys failure on a
+                                        # *found* input silently gave up here with no real fallback.
+                                        print(f"✗ Automatic upload failed: {send_keys_error}. Trying OS file dialog...")
+                                        need_os_dialog_fallback = True
                                 else:
+                                    need_os_dialog_fallback = True
+
+                                if need_os_dialog_fallback:
                                     # Fallback: Dice entirely pruned the input box from the DOM. We must manually trigger the Windows 'Replace' dialogue.
                                     try:
                                         # Click the '...' menu explicitly scoped to the active resume card
@@ -592,25 +608,86 @@ def apply_to_job_url(driver, job_url, resume_profiles=None, job_title: str = "",
                                                 }
                                             }
                                         """)
-                                        # Wait 2 seconds for the Windows Native Animation to launch and stabilize 
+                                        # Wait 2 seconds for the OS file dialog to launch and stabilize
                                         time.sleep(2.0)
-                                        
-                                        # Use standard pyautogui hooks to type the path into the active OS window
+
+                                        # Use cross-platform clipboard to copy the file path
                                         import subprocess
-                                        subprocess.run('clip.exe', text=True, input=selected_resume_path.strip())
-                                        time.sleep(0.5)
-                                        pyautogui.hotkey('ctrl', 'v')
-                                        time.sleep(0.5)
-                                        pyautogui.press('enter')
-                                        time.sleep(1.5)
-                                        
-                                        print(f"Uploaded mapped resume via Native Windows GUI string: {selected_resume_path}")
-                                        has_uploaded_resume = True
+                                        system = platform.system()
+                                        try:
+                                            if system == "Darwin":  # macOS
+                                                process = subprocess.Popen(['pbcopy'], stdin=subprocess.PIPE)
+                                                process.communicate(selected_resume_path.strip().encode('utf-8'))
+                                            elif system == "Windows":
+                                                subprocess.run('clip.exe', text=True, input=selected_resume_path.strip())
+                                            else:  # Linux
+                                                subprocess.run(['xclip', '-selection', 'clipboard'], input=selected_resume_path.strip().encode('utf-8'))
+                                        except Exception as clipboard_err:
+                                            print(f"Warning: Clipboard copy failed: {clipboard_err}")
+
+                                        time.sleep(1.0)
+
+                                        # Use OS-specific methods for file dialog
+                                        # Tracks whether we have real evidence the dialog was driven
+                                        # successfully — previously has_uploaded_resume was set to True
+                                        # unconditionally below regardless of what happened here, so an
+                                        # AppleScript failure would still be reported (and retried-past)
+                                        # as a successful upload, submitting the application with the
+                                        # wrong resume (or none) attached.
+                                        os_dialog_succeeded = True
+                                        if system == "Darwin":  # macOS
+                                            print("macOS: Automating file dialog with AppleScript...")
+                                            import subprocess
+                                            # Use osascript to handle the file dialog properly on macOS
+                                            escaped_path = selected_resume_path.replace('"', '\\"')
+                                            applescript = f'''
+                                                tell application "System Events"
+                                                    keystroke "g" using {{command down, shift down}}
+                                                    delay 1.2
+                                                    keystroke "{escaped_path}"
+                                                    delay 0.8
+                                                    key code 36
+                                                    delay 1.0
+                                                    key code 36
+                                                    delay 1.5
+                                                end tell
+                                            '''
+                                            try:
+                                                result = subprocess.run(['osascript', '-e', applescript], timeout=10, capture_output=True, text=True)
+                                                if result.returncode == 0:
+                                                    print("✓ File dialog automation complete - resume uploading")
+                                                else:
+                                                    print(f"✗ AppleScript error: {result.stderr}")
+                                                    # Fallback: Try pressing Tab + Enter to click Open button
+                                                    print("Trying fallback: navigating to Open button...")
+                                                    time.sleep(0.5)
+                                                    pyautogui.press('tab')
+                                                    time.sleep(0.3)
+                                                    pyautogui.press('enter')
+                                                    os_dialog_succeeded = False
+                                            except Exception as apple_err:
+                                                print(f"✗ AppleScript failed: {apple_err}")
+                                                os_dialog_succeeded = False
+                                        else:
+                                            # Windows/Linux: Use standard clipboard paste
+                                            paste_key = 'ctrl'
+                                            print(f"Windows/Linux: Pasting file path...")
+                                            pyautogui.hotkey(paste_key, 'v')
+                                            time.sleep(0.5)
+                                            pyautogui.press('enter')
+
+                                        time.sleep(3.0)  # Wait for file dialog to close and file to upload
+
+                                        if os_dialog_succeeded:
+                                            print(f"Uploaded mapped resume via Native OS file dialog: {selected_resume_path}")
+                                            has_uploaded_resume = True
+                                        else:
+                                            print("✗ Native OS file dialog upload could not be confirmed — will retry.")
                                     except Exception as e:
                                         print(f"Native GUI injection fallback failed: {e}")
                             except Exception as e:
-                                pass
-                                
+                                print(f"Resume upload attempt errored before any method could run: {e}")
+
                         # If we're on the Resume wizard step and we haven't uploaded our mapped resume, don't skip to Next yet.
                         # We allow up to MAX_RESUME_RETRIES attempts before giving up so the wizard never gets stuck.
                         if is_resume_step and selected_resume_path and os.path.exists(selected_resume_path) and not has_uploaded_resume:
@@ -750,17 +827,50 @@ def apply_to_job_url(driver, job_url, resume_profiles=None, job_title: str = "",
     driver.get(original_url)
     return applied, selected_profile_name, matched_reason, skip_reason, job_desc_text, selected_profile_id
 
-def fetch_jobs_with_requests(driver, search_query, include_keywords=None, exclude_keywords=None, pause_check=None):
+def fetch_jobs_with_requests(driver, search_query, include_keywords=None, exclude_keywords=None, pause_check=None,
+                             emp_type="THIRD_PARTY", posted_date="ONE", work_setting="ALL", easy_apply=False,
+                             location="", radius="30", will_sponsor=False, salary_min=""):
     """
     Use the existing browser instance to fetch job listings.
+    Accepts job filter parameters to build the appropriate Dice search URL.
     """
     print(f"Fetching jobs for query: {search_query}")
-    
+
     # Format search parameters for URL
     encoded_query = quote(search_query)
-    
-    # Updated URL structure
-    base_url = f"https://www.dice.com/jobs?filters.employmentType=THIRD_PARTY&filters.postedDate=ONE&q={encoded_query}"
+
+    # Map filter values to Dice URL parameters
+    employment_type_map = {
+        "ALL": "ALL",
+        "FULLTIME": "FULLTIME",
+        "CONTRACTS": "CONTRACTS",
+        "PARTTIME": "PARTTIME",
+        "THIRD_PARTY": "THIRD_PARTY"
+    }
+
+    posted_date_map = {
+        "ONE": "ONE",
+        "SEVEN": "SEVEN",
+        "THIRTY": "THIRTY",
+        "THREE": "THREE"
+    }
+
+    # Get mapped values or use defaults
+    emp_type_param = employment_type_map.get(emp_type, "THIRD_PARTY")
+    posted_date_param = posted_date_map.get(posted_date, "ONE")
+
+    # Build URL with filters
+    base_url = f"https://www.dice.com/jobs?filters.employmentType={emp_type_param}&filters.postedDate={posted_date_param}&q={encoded_query}"
+
+    # Add additional filters if specified
+    if location:
+        base_url += f"&filters.location={quote(location)}"
+    if radius and radius != "30":
+        base_url += f"&filters.radius={radius}"
+    if will_sponsor:
+        base_url += "&filters.willSponsor=true"
+    if easy_apply:
+        base_url += "&filters.easyApply=true"
     
     included_jobs = []
     excluded_jobs = []
