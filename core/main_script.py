@@ -1178,27 +1178,29 @@ def fetch_jobs_with_requests(driver, search_query, include_keywords=None, exclud
                         include_job = True
                         exclusion_reason = ""
 
-                        # Check exclude keywords (title only — user-defined)
+                        # Check exclude keywords (title + employment type + visible card
+                        # snippet — was title-only, which let excluded content slip through
+                        # whenever the title itself looked generic/harmless)
                         if exclude_keywords:
                             matching_excludes = []
                             for kw in exclude_keywords:
                                 pat = ResumeMatcher.build_keyword_pattern(kw)
-                                if pat and re.search(pat, job_title, re.IGNORECASE):
+                                if pat and re.search(pat, all_card_text, re.IGNORECASE):
                                     matching_excludes.append(kw)
                             if matching_excludes:
-                                exclusion_reason = f"Contains excluded keywords: {', '.join(matching_excludes)}"
+                                exclusion_reason = f"Contains excluded keywords (title/snippet): {', '.join(matching_excludes)}"
                                 include_job = False
-                        
-                        # Check include keywords
+
+                        # Check include keywords (same title+snippet scan as above)
                         if include_keywords and include_job:
                             found_include = False
                             for kw in include_keywords:
                                 pat = ResumeMatcher.build_keyword_pattern(kw)
-                                if pat and re.search(pat, job_title, re.IGNORECASE):
+                                if pat and re.search(pat, all_card_text, re.IGNORECASE):
                                     found_include = True
                                     break
                             if not found_include:
-                                exclusion_reason = f"Missing required keywords: {', '.join(include_keywords)}"
+                                exclusion_reason = f"Missing required keywords (title/snippet): {', '.join(include_keywords)}"
                                 include_job = False
                         
                         if include_job:

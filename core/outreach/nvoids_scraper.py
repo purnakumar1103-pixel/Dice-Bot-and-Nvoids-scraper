@@ -114,6 +114,17 @@ def _save_query_stats(stats: dict):
         pass
 
 
+# ── Auto-pause persistently zero-yield queries ──────────────────────────────
+# A search term that has found ~0 jobs across many recent runs is very likely
+# to keep finding 0 (dead/niche term for this site right now). Skipping it
+# most of the time — but still trying it occasionally in case new postings
+# start appearing — saves a full search-and-scan pass for no benefit, without
+# ever permanently blinding the bot to that term.
+_DEAD_QUERY_MIN_RUNS = 5            # need this much history before judging a query "dead"
+_DEAD_QUERY_FOUND_THRESHOLD = 0.5   # EMA of jobs FOUND below this = dead
+_DEAD_QUERY_REVISIT_EVERY = 5       # still run it once every N would-be-skips
+
+
 # ── Human-behaviour helpers ──────────────────────────────────────────────────
 
 def _human_pause(low: float = 0.3, high: float = 0.8):
@@ -839,6 +850,8 @@ class NvoidsScraper(BaseScraper):
                     if self.stop_flag:
                         self.log("[Nvoids] 🛑 Scraper stopped by user.")
                         break
+                    if self._should_skip_dead_query(query, _stats):
+                        continue
                     # ── Auto-recover from a dead driver before each query ──
                     if not self._is_driver_alive():
                         try:
@@ -908,10 +921,38 @@ class NvoidsScraper(BaseScraper):
             rec["ema_yield"] = round((1 - alpha) * rec.get("ema_yield", 0.0) + alpha * processed, 3)
             rec["ema_found"] = round((1 - alpha) * rec.get("ema_found", 0.0) + alpha * found, 3)
             rec["last_run"] = datetime.now().isoformat(timespec="seconds")
+            rec["skips_in_a_row"] = 0   # ran live this time, so reset the auto-pause streak
             stats[key] = rec
             _save_query_stats(stats)
         except Exception:
             pass
+
+    def _should_skip_dead_query(self, query: str, stats: dict) -> bool:
+        """True if `query` has found ~0 jobs over many recent runs and should be
+        auto-paused this cycle. Still lets it through every `_DEAD_QUERY_REVISIT_EVERY`
+        would-be-skips, in case new postings started appearing for it."""
+        try:
+            key = query.lower()
+            rec = stats.get(key)
+            if not rec or rec.get("runs", 0) < _DEAD_QUERY_MIN_RUNS:
+                return False
+            if rec.get("ema_found", 0.0) >= _DEAD_QUERY_FOUND_THRESHOLD:
+                return False
+            skips = rec.get("skips_in_a_row", 0)
+            if skips >= _DEAD_QUERY_REVISIT_EVERY:
+                rec["skips_in_a_row"] = 0
+                stats[key] = rec
+                _save_query_stats(stats)
+                return False
+            rec["skips_in_a_row"] = skips + 1
+            stats[key] = rec
+            _save_query_stats(stats)
+            self.log(f"[Nvoids] ⏭ Auto-pausing dead search term '{query}' "
+                     f"(0-yield across last {rec.get('runs')} runs) — "
+                     f"will retry in {_DEAD_QUERY_REVISIT_EVERY - rec['skips_in_a_row']} cycle(s).")
+            return True
+        except Exception:
+            return False
 
     def _scrape_query_inner(self, query: str, max_jobs: int, session_seen: set,
                             found_holder: dict) -> int:
@@ -926,11 +967,18 @@ class NvoidsScraper(BaseScraper):
             try:
                 # Cloudflare check loop (up to 60 seconds; longer wait per tick in headless
                 # mode since Turnstile takes more time without GPU/display rendering)
+                #
+                # NOTE: previously also matched on the word "cloudflare" appearing
+                # anywhere in the page source — but that text is present on every
+                # normal, unblocked page load too (verified directly: title stays
+                # normal, search box is immediately clickable, load takes <2s), so
+                # it was triggering this wait needlessly on nearly every query.
+                # The page title switching to "Just a moment..." is Cloudflare's
+                # actual interstitial-challenge signal — that alone is reliable.
                 cf_wait = 5 if self.headless else 3
                 for _ in range(15):
                     title = self.driver.title or ""
-                    source = self.driver.page_source or ""
-                    if "just a moment" in title.lower() or "cloudflare" in source.lower():
+                    if "just a moment" in title.lower():
                         self.log("[Nvoids] Cloudflare protection active. Waiting for auto-bypass...")
                         time.sleep(cf_wait)
                     else:
@@ -1044,6 +1092,28 @@ class NvoidsScraper(BaseScraper):
                     continue
                 seen_urls.add(url)
 
+                # ── Pre-filter: skip obviously-excluded jobs by TITLE alone, ──
+                # before opening the page at all. Many exclude-keywords (role
+                # type, seniority) already show up in the search-result title,
+                # so we save a full page load + content-poll wait for those.
+                # This is just an early exit for the OBVIOUS cases — the full
+                # body-text exclude check still runs later for anything that
+                # passes this quick title-only look, so nothing gets contacted
+                # that wouldn't have been already.
+                if self.exclude_keywords:
+                    title_check = title.lower()
+                    _pre_excluded_kw = None
+                    for exc in self.exclude_keywords:
+                        pat = r'\b' + re.escape(exc) + r'\b'
+                        if _has_unnegated_match(pat, title_check):
+                            _pre_excluded_kw = exc
+                            break
+                    if _pre_excluded_kw:
+                        self.log(f"[Nvoids] Skipped (title contains excluded keyword '{_pre_excluded_kw}'): {title[:60]}")
+                        if hasattr(self, '_summary'):
+                            self._summary["skill_skip"] += 1
+                        continue
+
                 # Human pause between jobs — critical for bot-detection bypass
                 _human_pause(0.5, 1.2)
                 if random.random() < 0.07:   # ~1 in 14 jobs: human got distracted
@@ -1118,6 +1188,20 @@ class NvoidsScraper(BaseScraper):
         try:
             self._safe_get(url, decrypt_emails=True)
 
+            # Dead/expired listing phrases — checked both during the content poll
+            # (to bail out early) and after it (as the authoritative dead check).
+            # NOTE: do NOT add "job_kill" — it appears in the footer of every
+            # live Nvoids listing ("To remove this job post send 'job_kill ...'")
+            _DEAD_PHRASES = (
+                "not available or removed",
+                "no longer available",
+                "this job has been removed",
+                "job has expired",
+                "listing is no longer",
+                "page not found",
+            )
+            _looks_dead = lambda t: any(p in t.lower() for p in _DEAD_PHRASES)
+
             # With page_load_strategy='eager' the driver returns as soon as the DOM
             # is interactive, but JS-rendered job content may not be painted yet.
             # ── Smart content poll ────────────────────────────────────────────
@@ -1126,17 +1210,19 @@ class NvoidsScraper(BaseScraper):
             # threshold of 120 is useless. Instead we poll until we see a signal
             # that real job content has loaded: either an email address OR
             # a body that is long enough to contain an actual JD (≥600 chars).
-            # We wait up to 10 s (20 × 0.5s) before giving up.
+            # We wait up to 10 s (20 × 0.5s) before giving up — unless a dead-listing
+            # phrase already appears, in which case we bail out immediately since
+            # that text never turns into an email or a full JD no matter how long we wait.
             body_text = self.driver.find_element(By.TAG_NAME, "body").text
             _HAS_CONTENT = lambda t: (
                 re.search(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}', t)
                 or len(t.strip()) >= 600
             )
-            if not _HAS_CONTENT(body_text):
+            if not _HAS_CONTENT(body_text) and not _looks_dead(body_text):
                 for _ in range(20):  # up to 10s (20 × 0.5s)
                     time.sleep(0.5)
                     body_text = self.driver.find_element(By.TAG_NAME, "body").text
-                    if _HAS_CONTENT(body_text):
+                    if _HAS_CONTENT(body_text) or _looks_dead(body_text):
                         break
 
             # ── Extract authoritative title from the detail page header ────
@@ -1174,18 +1260,9 @@ class NvoidsScraper(BaseScraper):
 
             # Dead/expired listing — bail BEFORE scrolling, Groq, or Excel writes.
             # A listing is dead when the page has no email AND no substantial JD body.
-            # We also catch explicit Nvoids removal/error phrases.
-            _DEAD_PHRASES = (
-                "not available or removed",
-                "no longer available",
-                "this job has been removed",
-                "job has expired",
-                "listing is no longer",
-                "page not found",
-                # NOTE: do NOT add "job_kill" — it appears in the footer of every
-                # live Nvoids listing ("To remove this job post send 'job_kill ...'")
-            )
-            _has_dead_phrase = any(p in body_text.lower() for p in _DEAD_PHRASES)
+            # We also catch explicit Nvoids removal/error phrases (via _looks_dead,
+            # defined earlier alongside the content poll).
+            _has_dead_phrase = _looks_dead(body_text)
             _has_email = bool(re.search(
                 r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}', body_text
             ))

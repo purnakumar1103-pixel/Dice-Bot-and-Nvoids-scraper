@@ -4,7 +4,7 @@ AIExtractor – Groq-powered fallback for location & keyword extraction.
 Only called when regex extraction returns empty results, so it adds
 minimal latency to the overall pipeline (regex handles most cases).
 
-Model: llama-3.1-8b-instant  (~200-400ms, free tier: 14,400 req/day)
+Model: openai/gpt-oss-20b (llama-3.1-8b-instant was retired by Groq)
 """
 
 import json
@@ -24,9 +24,13 @@ class AIExtractor:
         keywords = result.get("keywords", "")
     """
 
-    MODEL = "llama-3.1-8b-instant"
+    # llama-3.1-8b-instant was retired by Groq — replaced with their current
+    # open-weight lineup. This is a reasoning model: pass reasoning_effort="low"
+    # on every call, otherwise it can burn the whole max_tokens budget on
+    # internal reasoning and return empty/truncated content.
+    MODEL = "openai/gpt-oss-20b"
     MAX_BODY_CHARS = 2000   # Truncate body to save tokens & reduce latency
-    MAX_TOKENS     = 200    # Enough for full 5-field JSON (job_title + keywords can be ~120 chars)
+    MAX_TOKENS     = 350    # Enough for full 5-field JSON — 200 truncated mid-output on the current model
     
     # Persist cache across multiple pipeline instantiations within the same app session
     _GLOBAL_CACHE = {}
@@ -101,6 +105,7 @@ class AIExtractor:
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=self.MAX_TOKENS,
                 temperature=0,        # Deterministic output
+                reasoning_effort="low",
             )
             self.__class__._GLOBAL_CALL_COUNT += 1
             raw = response.choices[0].message.content.strip()
@@ -168,8 +173,9 @@ class AIExtractor:
             response = client.chat.completions.create(
                 model=self.MODEL,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=150,
+                max_tokens=350,   # 150 truncated mid-sentence on the current reasoning model
                 temperature=0.3,
+                reasoning_effort="low",
             )
             self.__class__._GLOBAL_CALL_COUNT += 1
             email_text = response.choices[0].message.content.strip()
