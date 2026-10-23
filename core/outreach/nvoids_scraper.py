@@ -34,6 +34,11 @@ import undetected_chromedriver as uc
 
 from core.outreach.scraper_engine import BaseScraper
 from core.outreach.ai_extractor import AIExtractor
+from core.outreach.nvoids_links import (
+    NVOIDS_JOB_DETAIL_CSS_SELECTOR,
+    NVOIDS_JOB_DETAIL_XPATH,
+    is_nvoids_job_detail_url,
+)
 from core.learning_engine import LearningEngine
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -763,6 +768,12 @@ class NvoidsScraper(BaseScraper):
             f"Limit: {self.limit} | skip_email={self.skip_email}"
         )
 
+        # One id per scraper run, written into every operational-state row this
+        # run produces (core/state_tracker.py) so an interrupted run's jobs can
+        # be told apart from a later run's.
+        if hasattr(self.pipeline, "current_run_id"):
+            self.pipeline.current_run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+
         try:
             self.driver = self._build_driver()
             # We'll use a set to track (email, normalized_title) pairs processed
@@ -1020,7 +1031,7 @@ class NvoidsScraper(BaseScraper):
             try:
                 WebDriverWait(self.driver, 20).until(
                     EC.presence_of_element_located(
-                        (By.XPATH, "//a[contains(@href, 'job_details')]")
+                        (By.XPATH, NVOIDS_JOB_DETAIL_XPATH)
                     )
                 )
             except TimeoutException:
@@ -1031,7 +1042,7 @@ class NvoidsScraper(BaseScraper):
             # (the row text often contains the post date, used for pre-sorting)
             try:
                 js_links = self.driver.execute_script("""
-                    return Array.from(document.querySelectorAll("a[href*='job_details']"))
+                    return Array.from(document.querySelectorAll(arguments[0]))
                         .map(a => {
                             // Walk up to find a table row or container that holds the post date
                             let rowText = "";
@@ -1047,7 +1058,7 @@ class NvoidsScraper(BaseScraper):
                             }
                             return { text: (a.textContent || "").trim(), href: a.href, row: rowText };
                         });
-                """)
+                """, NVOIDS_JOB_DETAIL_CSS_SELECTOR)
             except Exception as jse:
                 self.log(f"[Nvoids] JS extraction failed: {jse}")
                 js_links = []
@@ -1057,7 +1068,7 @@ class NvoidsScraper(BaseScraper):
                 try:
                     title = item.get("text", "").strip()
                     url = item.get("href", "").strip()
-                    if title and url and _title_matches_query(title, query):
+                    if title and is_nvoids_job_detail_url(url) and _title_matches_query(title, query):
                         row_text = item.get("row", "")
                         post_dt = _extract_post_date(row_text) if row_text else None
                         job_links.append((title, url, post_dt))
